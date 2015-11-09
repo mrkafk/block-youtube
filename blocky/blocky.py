@@ -15,6 +15,7 @@ ips = []
 
 logging.basicConfig()
 log = logging.getLogger()
+log.setLevel(logging.INFO)
 
 
 # Exceptions
@@ -36,6 +37,9 @@ class IPSetError(BlockIPError):
 
 
 class ConfigFileNotFound(Exception):
+    pass
+
+class IncorrectCheckEvery(Exception):
     pass
 
 
@@ -61,14 +65,17 @@ class DetectIPAddresses(object):
 
 
 class IPTablesHandler(object):
-    def __init__(self, table_name='', chain_name=''):
+    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky'):
         self.chain_name = chain_name
         self.table_name = table_name
+        self.ipset_name = ipset_name
         self.chain = None
         self.table = None
+        self.rule = None
+        self._comment = 'Blocky IPTables Rule'
         self._table_find()
         self._chain_find()
-        self.rules()
+        self._rule_find()
 
     def _table_find(self):
         try:
@@ -88,12 +95,31 @@ class IPTablesHandler(object):
             self._chain_find()
         return self.chain.rules
 
+    def insert_rule(self):
+        if not self.rule:
+            rule = Rule()
+            rule.protocol = 'tcp'
+            rule.target = rule.create_target('DROP')
+            match = rule.create_match('comment')
+            match.comment = self._comment
+            match = rule.create_match('set')
+            match.match_set = [self.ipset_name, 'src']
+            log.info('''Inserting a rule with target DROP into chain %s (table %s) for ipset "%s" (with comment "%s")''',
+                     self.chain_name, self.table_name, self.ipset_name, self._comment)
+            self.chain.insert_rule(rule, position=0)
+
+    def _rule_find(self):
+        for rule in self.rules():
+            match_with_comment = filter(lambda m: m.comment == self._comment, rule.matches)
+            if match_with_comment:
+                self.rule = rule
+                return rule
 
 
 class IPSetHandler(object):
-    def __init__(self):
-        self.blacklist_name = 'blocky_blacklist'
-        self.create_ipset_args = 'create {} hash:ip hashsize 4096'.format(self.blacklist_name)
+    def __init__(self, ipset_name='blocky_blacklist'):
+        self.ipset_name = ipset_name
+        self.create_ipset_args = 'create {} hash:ip hashsize 4096'.format(self.ipset_name)
         self.path = os.environ.get('PATH', '/sbin:/bin:/usr/sbin:/usr/bin')
 
     def _env(self):
@@ -110,32 +136,46 @@ class IPSetHandler(object):
 
 
 class Settings(object):
-    def __init__(self, config_file='/etc/blocky.conf'):
-        self.config_file = config_file
-        self.settings = {}
-        self.list_keys = ['domains']
+    def __init__(self, config_file='/etc/blocky.conf',
+                 mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level']):
+        self._config_file = config_file
+        self._list_keys = ['domains']
+        self._mandatory_fields = mandatory_fields
+        self._parse_config()
 
-    def parse_config(self):
+    def _parse_config(self):
         cp = ConfigParser()
-        cp.read(self.config_file)
+        cp.read(self._config_file)
         if not 'main' in cp.sections():
-            raise ConfigFileNotFound(self.config_file)
+            raise ConfigFileNotFound(self._config_file)
+        visited = set()
         for opt in cp.options('main'):
             val = cp.get('main', opt)
-            if opt in self.list_keys:
+            if opt in self._list_keys:
                 val = [x.strip() for x in val.split(',')]
-            self.settings[opt] = val
+            setattr(self, opt, val)
+            visited.add(opt)
+        diff = set(self._mandatory_fields) - visited
+        if diff:
+            log.error('Following mandatory option(s) are not set in config file %s: %s. Aborting.', self._config_file,
+                      ', '.join(map(str, list(diff))))
+            sys.exit(6)
+
+
 
 
 class StartupChecks(object):
-    def __init__(self, table_name='', chain_name=''):
-        self.table_name = table_name
-        self.chain_name = chain_name
+    def __init__(self, settings):
+        self.table_name = settings.table
+        self.chain_name = settings.chain
+        self.settings = settings
 
     def test_prereqs(self):
+        self.check_int_check_every()
         self.check_root()
         self.check_command_availability()
         self.check_table_and_chain()
+
 
     def check_command_availability(self):
         for cmd, args in [('iptables', '-L -n'), ('ipset', '-L -n')]:
@@ -154,25 +194,43 @@ class StartupChecks(object):
         th = IPTablesHandler(table_name=self.table_name, chain_name=self.chain_name)
         th._chain_find()
 
+    def check_int_check_every(self):
+        try:
+            ce = int(self.settings.check_every)
+        except ValueError:
+            raise IncorrectCheckEvery(self.settings.check_every)
+        if ce <= 0:
+            raise IncorrectCheckEvery(self.settings.check_every)
+        self.settings.check_every = ce
+
+
+def set_log_level(log, log_level_name):
+    try:
+        level = getattr(logging, log_level_name.strip().upper())
+        log.setLevel(level)
+    except AttributeError:
+        log.error('Log level %s not found. Aborting.', log_level_name)
+        sys.exit(7)
+
 
 class Main(object):
     def run(self):
         try:
             # Parse config file
-            s = Settings()
-            s.parse_config()
-            settings = s.settings
-            table_name = settings.get('table')
-            chain_name = settings.get('chain')
+            settings = Settings()
+            log_level_name = settings.log_level
+            set_log_level(log, log_level_name)
             log.debug('Settings: %s', settings)
             # Do startup checks
-            sc = StartupChecks(table_name=table_name, chain_name=chain_name)
+            sc = StartupChecks(settings)
             sc.test_prereqs()
             # Create ipset
-            ish = IPSetHandler()
+            ish = IPSetHandler(ipset_name=settings.ipset)
             ish.create_ipset()
-            # Insert iptable rule
-            ith = IPTablesHandler(table_name=table_name, chain_name=chain_name)
+            # Insert iptables rule
+            ith = IPTablesHandler(table_name=settings.table, chain_name=settings.chain, ipset_name=settings.ipset)
+            ith.insert_rule()
+            #
             det = DetectIPAddresses()
             print det.iplist()
         except ConfigFileNotFound as e:
@@ -182,11 +240,21 @@ class Main(object):
             log.error('Table %s not found', e)
             sys.exit(3)
         except ChainNotFound as e:
-            log.error('Chain %s not found in table %s', e, table_name)
+            log.error('Chain %s not found in table %s', e, settings.table)
             sys.exit(4)
         except IPSetError as e:
             log.error('ipset problem: %s', e)
             sys.exit(5)
+        except IncorrectCheckEvery as e:
+            log.error('Incorrect check_every setting (%s) in config file. Aborting.', e)
+            sys.exit(8)
+
+
+# TODO: empty ipset on shutdown
+# TODO: log blocked ips regularly
+# TODO: log blocked ips on change
+# TODO: detect rule by comment
+# TODO: delete rule on shutdown
 
 
 if __name__ == '__main__':

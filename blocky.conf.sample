@@ -2,7 +2,9 @@
 # iptables chain name to add rule to
 table = FILTER
 chain = FORWARD
-#
+# Number of seconds between domain(s) check (positive integer)
 check_every = 30
 # comma-separated list of domains to resolve and block their IP addresses
 domains = youtube.com, youtube.pl
+ipset = blocky_blacklist
+log_level = debug
