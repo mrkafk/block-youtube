@@ -74,6 +74,7 @@ def flatten(lst):
 
 
 class LogConfig(object):
+
     def __init__(self, log_level='info', log_type='syslog', log_facility='daemon', log_path='/var/log/blocky.log'):
         self.log_level = log_level
         self.log_type = log_type
@@ -296,6 +297,7 @@ class StartupChecks(object):
 
 
 class Checkpoint(object):
+
     def __init__(self, settings):
         self.settings = settings
 
@@ -310,10 +312,22 @@ class Checkpoint(object):
         delay = self.settings['check_every']
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
         setproctitle('blocky.py')
+        self.log_startup_notice()
         while True:
             iplist = detect.iplist()
             ish.update_ipset(iplist)
             time.sleep(delay)
+
+    def log_startup_notice(self):
+        log.info('blocky (Block-YouTube) startup. Settings:')
+        keys = self.settings.keys()
+        keys.sort()
+        log.info('Config file: %s', self.settings._config_file)
+        for k in keys:
+            val = self.settings.get(k)
+            if isinstance(val, list):
+                val = ', '.join(map(str, val))
+            log.info('   %s: %s', k, val)
 
 
 class Main(object):
@@ -363,7 +377,8 @@ class Main(object):
             cp = Checkpoint(self.settings)
             cp.run()
 
-
+# TODO: shutdown handler
+# TODO: startup notif
 # TODO: delete ipset on shutdown
 # TODO: log blocked ips regularly
 # TODO: log blocked ips on change
