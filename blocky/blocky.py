@@ -11,6 +11,7 @@ import logging.handlers
 from ConfigParser import ConfigParser
 from dns import resolver
 from iptc import Rule, Match, Target, Table
+from setproctitle import setproctitle
 
 ips = []
 
@@ -308,6 +309,7 @@ class Checkpoint(object):
         ith.insert_rule()
         delay = self.settings['check_every']
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
+        setproctitle('blocky.py')
         while True:
             iplist = detect.iplist()
             ish.update_ipset(iplist)
@@ -357,18 +359,17 @@ class Main(object):
             sys.exit(9)
 
     def run(self):
-        # with daemon.DaemonContext():
+        with daemon.DaemonContext():
+            cp = Checkpoint(self.settings)
+            cp.run()
 
-        cp = Checkpoint(self.settings)
-        cp.run()
 
-
-# TODO: empty ipset on shutdown
+# TODO: delete ipset on shutdown
 # TODO: log blocked ips regularly
 # TODO: log blocked ips on change
 # TODO: detect rule by comment
 # TODO: delete rule on shutdown
-# TODO: log to system logger or a file
+# DONE: log to system logger or a file
 
 if __name__ == '__main__':
     m = Main()
