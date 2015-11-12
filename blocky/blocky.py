@@ -1,14 +1,20 @@
 #!/usr/bin/env python2.7
 
 import commands
+import contextlib
 import sys
 import subprocess
 import time
+
+import signal
+
 import daemon
 import os
 import logging
 import logging.handlers
 from ConfigParser import ConfigParser
+
+import psutil
 from dns import resolver
 from iptc import Rule, Match, Target, Table
 from setproctitle import setproctitle
@@ -19,6 +25,7 @@ logging.basicConfig()
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
+proc_title = 'blocky.py'
 
 # Exceptions
 
@@ -71,6 +78,14 @@ def flatten(lst):
         else:
             flat.append(x)
     return flat
+
+@contextlib.contextmanager
+def pidfile_ctxmgr(pidfile_path):
+    pid = os.getpid()
+    with open(pidfile_path, 'wb') as fo:
+        fo.write(str(pid))
+    yield
+    os.unlink(pidfile_path)
 
 
 class LogConfig(object):
@@ -230,7 +245,7 @@ class IPSetHandler(object):
 
 class Settings(dict):
     def __init__(self, config_file='/etc/blocky.conf',
-                 mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level']):
+                 mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level', 'log_type', 'pidfile']):
         self._config_file = config_file
         self._list_keys = ['domains']
         self._mandatory_fields = mandatory_fields
@@ -267,6 +282,7 @@ class StartupChecks(object):
         self.check_root()
         self.check_command_availability()
         self.check_table_and_chain()
+        # self.check_pidfile_process()
 
     def check_command_availability(self):
         for cmd, args in [('iptables', '-L -n'), ('ipset', '-L -n')]:
@@ -295,6 +311,33 @@ class StartupChecks(object):
             raise IncorrectCheckEvery(cev)
         self.settings['check_every'] = cev
 
+    def check_pidfile_process(self):
+        pidfile = self.settings['pidfile']
+        log.debug('pidfile: %s', pidfile)
+        if os.path.isfile(pidfile):
+            pid = None
+            for line in open(pidfile,'r'):
+                pid = line.strip()
+                if pid:
+                    break
+            try:
+                pid = int(pid)
+                pid_exists = psutil.pid_exists(pid)
+                proc = psutil.Process(pid)
+                if pid_exists and proc.name() == 'blocky.py':
+                    log.warn('blocky appears to run in process %s. Killing it.', pid)
+                    os.kill(pid, signal.SIGTERM)
+                    return
+                if pid_exists:
+                    log.error(
+                        'blocky appears to run in process %s, but its name (%s) is different than expected "%s". Abort.',
+                        pid, proc.name(), proc_title)
+                    sys.exit(10)
+            except ValueError:
+                return
+
+
+
 
 class Checkpoint(object):
 
@@ -311,7 +354,7 @@ class Checkpoint(object):
         ith.insert_rule()
         delay = self.settings['check_every']
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
-        setproctitle('blocky.py')
+        setproctitle(proc_title)
         self.log_startup_notice()
         while True:
             iplist = detect.iplist()
@@ -373,12 +416,13 @@ class Main(object):
             sys.exit(9)
 
     def run(self):
-        with daemon.DaemonContext():
+        with daemon.DaemonContext(pidfile=pidfile_ctxmgr(self.settings.get('pidfile', '/var/run/blocky.pid'))):
             cp = Checkpoint(self.settings)
             cp.run()
 
 # TODO: shutdown handler
-# TODO: startup notif
+# DONE: startup notif
+# TODO: startup check if pid exists and has title 'blocky'
 # TODO: delete ipset on shutdown
 # TODO: log blocked ips regularly
 # TODO: log blocked ips on change

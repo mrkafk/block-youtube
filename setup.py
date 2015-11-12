@@ -4,7 +4,7 @@ setup(
     name='blocky',
     version='0.1',
     packages=['blocky'],
-    install_requires=['dnspython', 'python-iptables', 'python-daemon', 'setproctitle'],
+    install_requires=['dnspython', 'python-iptables', 'python-daemon', 'setproctitle', 'psutil'],
     url='https://github.com/mrkafk/block-youtube',
     license='MIT',
     author='Marcin Krol',
