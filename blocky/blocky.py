@@ -2,13 +2,12 @@
 
 import commands
 import sys
-
 import subprocess
-
 import time
-
+import daemon
 import os
 import logging
+import logging.handlers
 from ConfigParser import ConfigParser
 from dns import resolver
 from iptc import Rule, Match, Target, Table
@@ -41,7 +40,23 @@ class IPSetError(BlockIPError):
 class ConfigFileNotFound(Exception):
     pass
 
+
 class IncorrectCheckEvery(Exception):
+    pass
+
+
+class IncorrectLogType(Exception):
+    pass
+
+
+class IncorrectLogLevel(Exception):
+    pass
+
+
+class IncorrectLogFacility(Exception):
+    pass
+
+class LogPathUnset(Exception):
     pass
 
 
@@ -57,16 +72,56 @@ def flatten(lst):
     return flat
 
 
-def set_log_level(log, log_level_name):
-    try:
-        level = getattr(logging, log_level_name.strip().upper())
-        log.setLevel(level)
-    except AttributeError:
-        log.error('Log level %s not found. Aborting.', log_level_name)
-        sys.exit(7)
+class LogConfig(object):
+    def __init__(self, log_level='info', log_type='syslog', log_facility='daemon', log_path='/var/log/blocky.log'):
+        self.log_level = log_level
+        self.log_type = log_type
+        self.log_facility = log_facility
+        self.log_path = log_path
 
+    def set_log_level(self, log_level_name):
+        try:
+            level = getattr(logging, log_level_name.strip().upper())
+            log.setLevel(level)
+        except AttributeError:
+            raise IncorrectLogLevel(log_level_name)
 
+    def set_handler(self, log_type='syslog', log_facility='daemon', log_path='/var/log/blocky.log', log_level='info'):
+        ltype = log_type.lower().strip()
+        eff_log_path = log_path.strip()
+        if ltype == 'file':
+            if not eff_log_path:
+                raise LogPathUnset(eff_log_path)
+            log.debug('Logging to file %s', log_path)
+            self._reset_handlers(log)
+            self.set_log_level(log_level)
+            fh = logging.FileHandler(log_path)
+            self._set_formatter(fh)
+            log.addHandler(fh)
+            return
+        if ltype == 'syslog':
+            # we're on Linux anyway
+            facility_name = 'LOG_{}'.format(log_facility.strip().upper())
+            try:
+                log_facility_num = getattr(logging.handlers.SysLogHandler, facility_name)
+            except AttributeError:
+                raise IncorrectLogFacility(log_type)
+            sh = logging.handlers.SysLogHandler(address='/dev/log', facility=log_facility_num)
+            log.debug('Logging to syslog handler facility: %s', log_facility)
+            self._reset_handlers(log)
+            self.set_log_level(log_level)
+            log.addHandler(sh)
+            self._set_formatter(sh)
+            return
+        raise IncorrectLogType(log_type)
 
+    def _reset_handlers(self, log):
+        for hd in log.handlers:
+            log.removeHandler(hd)
+
+    def _set_formatter(self, handler):
+        fmt = logging.Formatter('blocky %(levelname)s | %(message)s')
+        handler.setFormatter(fmt)
 
 
 class DetectIPAddresses(object):
@@ -122,8 +177,9 @@ class IPTablesHandler(object):
             match.comment = self._comment
             match = rule.create_match('set')
             match.match_set = [self.ipset_name, 'src']
-            log.info('''Inserting a rule with target DROP into chain %s (table %s) for ipset "%s" (with comment "%s")''',
-                     self.chain_name, self.table_name, self.ipset_name, self._comment)
+            log.info(
+                '''Inserting a rule with target DROP into chain %s (table %s) for ipset "%s" (with comment "%s")''',
+                self.chain_name, self.table_name, self.ipset_name, self._comment)
             self.chain.insert_rule(rule, position=0)
 
     def _rule_find(self):
@@ -170,8 +226,7 @@ class IPSetHandler(object):
             self.iplist_prev = iplist
 
 
-
-class Settings(object):
+class Settings(dict):
     def __init__(self, config_file='/etc/blocky.conf',
                  mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level']):
         self._config_file = config_file
@@ -189,19 +244,20 @@ class Settings(object):
             val = cp.get('main', opt)
             if opt in self._list_keys:
                 val = [x.strip() for x in val.split(',')]
-            setattr(self, opt, val)
+            # setattr(self, opt, val)
+            self[opt] = val
             visited.add(opt)
         diff = set(self._mandatory_fields) - visited
         if diff:
             log.error('Following mandatory option(s) are not set in config file %s: %s. Aborting.', self._config_file,
                       ', '.join(map(str, list(diff))))
-            sys.exit(6)
+            sys.exit(1)
 
 
 class StartupChecks(object):
     def __init__(self, settings):
-        self.table_name = settings.table
-        self.chain_name = settings.chain
+        self.table_name = settings['table']
+        self.chain_name = settings['chain']
         self.settings = settings
 
     def test_prereqs(self):
@@ -209,7 +265,6 @@ class StartupChecks(object):
         self.check_root()
         self.check_command_availability()
         self.check_table_and_chain()
-
 
     def check_command_availability(self):
         for cmd, args in [('iptables', '-L -n'), ('ipset', '-L -n')]:
@@ -229,29 +284,30 @@ class StartupChecks(object):
         th._chain_find()
 
     def check_int_check_every(self):
+        cev = self.settings.get('check_every')
         try:
-            ce = int(self.settings.check_every)
+            cev = int(cev)
         except ValueError:
-            raise IncorrectCheckEvery(self.settings.check_every)
-        if ce <= 0:
-            raise IncorrectCheckEvery(self.settings.check_every)
-        self.settings.check_every = ce
+            raise IncorrectCheckEvery(cev)
+        if cev <= 0:
+            raise IncorrectCheckEvery(cev)
+        self.settings['check_every'] = cev
 
 
 class Checkpoint(object):
-
     def __init__(self, settings):
         self.settings = settings
 
     def run(self):
         # Create ipset
-        ish = IPSetHandler(ipset_name=self.settings.ipset)
+        ish = IPSetHandler(ipset_name=self.settings['ipset'])
         ish.create_ipset()
         # Insert iptables rule
-        ith = IPTablesHandler(table_name=self.settings.table, chain_name=self.settings.chain, ipset_name=self.settings.ipset)
+        ith = IPTablesHandler(table_name=self.settings['table'], chain_name=self.settings['chain'],
+                              ipset_name=self.settings['ipset'])
         ith.insert_rule()
-        delay = int(self.settings.check_every)
-        detect = DetectIPAddresses(fqdns=self.settings.domains)
+        delay = self.settings['check_every']
+        detect = DetectIPAddresses(fqdns=self.settings['domains'])
         while True:
             iplist = detect.iplist()
             ish.update_ipset(iplist)
@@ -259,17 +315,19 @@ class Checkpoint(object):
 
 
 class Main(object):
-    def run(self):
+    def __init__(self):
         try:
             # Parse config file
             settings = Settings()
-            log_level_name = settings.log_level
-            set_log_level(log, log_level_name)
+            self.logconf = LogConfig()
+            self.logconf.set_log_level(settings.get('log_level', 'info'))
             # Do startup checks
             sc = StartupChecks(settings)
             sc.test_prereqs()
-            cp = Checkpoint(settings)
-            cp.run()
+            self.settings = settings
+            self.logconf.set_handler(log_type=settings.get('log_type', 'syslog'),
+                                     log_facility=settings.get('log_facility', 'daemon'),
+                                     log_path=settings.get('log_path', '/var/log/blocky.log'))
         except ConfigFileNotFound as e:
             log.error('Config file not found or [main] section is missing: %s', e)
             sys.exit(2)
@@ -284,7 +342,25 @@ class Main(object):
             sys.exit(5)
         except IncorrectCheckEvery as e:
             log.error('Incorrect check_every setting (%s) in config file. Aborting.', e)
+            sys.exit(6)
+        except IncorrectLogType as e:
+            log.error('Incorrect log_type setting (%s) in config file. Aborting.', e)
+            sys.exit(7)
+        except IncorrectLogLevel as e:
+            log.error('Incorrect log_level setting (%s) in config file. Aborting.', e)
             sys.exit(8)
+        except IncorrectLogFacility as e:
+            log.error('Incorrect log_facility setting (%s) in config file. Aborting.', e)
+            sys.exit(9)
+        except LogPathUnset as e:
+            log.error('Log type is set to file, but log_path setting (%s) is empty or incorrect. Aborting.', e)
+            sys.exit(9)
+
+    def run(self):
+        # with daemon.DaemonContext():
+
+        cp = Checkpoint(self.settings)
+        cp.run()
 
 
 # TODO: empty ipset on shutdown
