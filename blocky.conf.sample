@@ -1,10 +1,28 @@
 [main]
-# iptables chain name to add rule to
+# iptables table
 table = FILTER
-chain = FORWARD
+
+# iptables chain name to add rule to
+chain = INPUT
+
 # Number of seconds between domain(s) check (positive integer)
-check_every = 30
+check_every = 2
+
 # comma-separated list of domains to resolve and block their IP addresses
 domains = youtube.com, youtube.pl
+
+# ipset to use to block domain's IP addresses
 ipset = blocky_blacklist
+
+# log_type: syslog, file
+log_type = syslog
+#log_type = file
+
+# log_path: if log_type is 'file', set file to log to here
+log_path = /var/log/blocky.log
+
+# log facility: auth, authpriv, cron, daemon, ftp, kern, lpr, mail, news, syslog, user, uucp, local0, local1, local2, local3, local4, local5, local6, local7
+log_facility = daemon
+
+# log level: alert, critical, debug, emerg, error, info, notice, warn
 log_level = debug
