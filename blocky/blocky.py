@@ -5,6 +5,8 @@ import sys
 
 import subprocess
 
+import time
+
 import os
 import logging
 from ConfigParser import ConfigParser
@@ -55,13 +57,29 @@ def flatten(lst):
     return flat
 
 
+def set_log_level(log, log_level_name):
+    try:
+        level = getattr(logging, log_level_name.strip().upper())
+        log.setLevel(level)
+    except AttributeError:
+        log.error('Log level %s not found. Aborting.', log_level_name)
+        sys.exit(7)
+
+
+
+
+
 class DetectIPAddresses(object):
     def __init__(self, fqdns=[]):
         self.fqdns = fqdns
         self._rslv = resolver.Resolver()
 
     def iplist(self):
-        return flatten([[x.address for x in self._rslv.query(fqdn, 'A')] for fqdn in self.fqdns])
+        log.debug('FQDNs: %s', self.fqdns)
+        addresses = flatten([[x.address for x in self._rslv.query(fqdn, 'A')] for fqdn in self.fqdns])
+        uniq = list(set(addresses))
+        uniq.sort()
+        return uniq
 
 
 class IPTablesHandler(object):
@@ -121,18 +139,36 @@ class IPSetHandler(object):
         self.ipset_name = ipset_name
         self.create_ipset_args = 'create {} hash:ip hashsize 4096'.format(self.ipset_name)
         self.path = os.environ.get('PATH', '/sbin:/bin:/usr/sbin:/usr/bin')
+        self.iplist_prev = []
 
     def _env(self):
         return {'PATH': self.path, 'LC_ALL': 'C'}
 
-    def create_ipset(self):
-        cmds = flatten(['ipset', self.create_ipset_args.split()])
+    def run_ipset_cmd(self, cmds):
         p = subprocess.Popen(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self._env())
         so, se = p.communicate()
         if p.returncode:
             if not so and se.find('set with the same name already exists') > -1:
                 return
             raise IPSetError(se)
+
+    def create_ipset(self):
+        cmds = flatten(['ipset', self.create_ipset_args.split()])
+        self.run_ipset_cmd(cmds)
+
+    def update_ipset(self, iplist):
+        iplist.sort()
+        if iplist != self.iplist_prev:
+            log.info('Updating ipset %s with IP addresses: %s', self.ipset_name, ', '.join(map(str, iplist)))
+            cmds = flatten(['ipset', 'flush', self.ipset_name])
+            self.run_ipset_cmd(cmds)
+            log.debug(cmds)
+            for ip in iplist:
+                cmds = flatten(['ipset', 'add', self.ipset_name, str(ip)])
+                log.debug(cmds)
+                self.run_ipset_cmd(cmds)
+            self.iplist_prev = iplist
+
 
 
 class Settings(object):
@@ -160,8 +196,6 @@ class Settings(object):
             log.error('Following mandatory option(s) are not set in config file %s: %s. Aborting.', self._config_file,
                       ', '.join(map(str, list(diff))))
             sys.exit(6)
-
-
 
 
 class StartupChecks(object):
@@ -204,13 +238,24 @@ class StartupChecks(object):
         self.settings.check_every = ce
 
 
-def set_log_level(log, log_level_name):
-    try:
-        level = getattr(logging, log_level_name.strip().upper())
-        log.setLevel(level)
-    except AttributeError:
-        log.error('Log level %s not found. Aborting.', log_level_name)
-        sys.exit(7)
+class Checkpoint(object):
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    def run(self):
+        # Create ipset
+        ish = IPSetHandler(ipset_name=self.settings.ipset)
+        ish.create_ipset()
+        # Insert iptables rule
+        ith = IPTablesHandler(table_name=self.settings.table, chain_name=self.settings.chain, ipset_name=self.settings.ipset)
+        ith.insert_rule()
+        delay = int(self.settings.check_every)
+        detect = DetectIPAddresses(fqdns=self.settings.domains)
+        while True:
+            iplist = detect.iplist()
+            ish.update_ipset(iplist)
+            time.sleep(delay)
 
 
 class Main(object):
@@ -220,19 +265,11 @@ class Main(object):
             settings = Settings()
             log_level_name = settings.log_level
             set_log_level(log, log_level_name)
-            log.debug('Settings: %s', settings)
             # Do startup checks
             sc = StartupChecks(settings)
             sc.test_prereqs()
-            # Create ipset
-            ish = IPSetHandler(ipset_name=settings.ipset)
-            ish.create_ipset()
-            # Insert iptables rule
-            ith = IPTablesHandler(table_name=settings.table, chain_name=settings.chain, ipset_name=settings.ipset)
-            ith.insert_rule()
-            #
-            det = DetectIPAddresses()
-            print det.iplist()
+            cp = Checkpoint(settings)
+            cp.run()
         except ConfigFileNotFound as e:
             log.error('Config file not found or [main] section is missing: %s', e)
             sys.exit(2)
@@ -255,7 +292,7 @@ class Main(object):
 # TODO: log blocked ips on change
 # TODO: detect rule by comment
 # TODO: delete rule on shutdown
-
+# TODO: log to system logger or a file
 
 if __name__ == '__main__':
     m = Main()
