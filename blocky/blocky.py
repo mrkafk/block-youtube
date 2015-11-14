@@ -5,18 +5,17 @@ import contextlib
 import sys
 import subprocess
 import time
-
 import signal
+from functools import partial
 
 import daemon
 import os
 import logging
 import logging.handlers
-from ConfigParser import ConfigParser
-
 import psutil
+from ConfigParser import ConfigParser
 from dns import resolver
-from iptc import Rule, Match, Target, Table
+from iptc import Rule, Table
 from setproctitle import setproctitle
 
 ips = []
@@ -26,6 +25,7 @@ log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 proc_title = 'blocky.py'
+
 
 # Exceptions
 
@@ -64,6 +64,7 @@ class IncorrectLogLevel(Exception):
 class IncorrectLogFacility(Exception):
     pass
 
+
 class LogPathUnset(Exception):
     pass
 
@@ -79,6 +80,7 @@ def flatten(lst):
             flat.append(x)
     return flat
 
+
 @contextlib.contextmanager
 def pidfile_ctxmgr(pidfile_path):
     pid = os.getpid()
@@ -88,8 +90,17 @@ def pidfile_ctxmgr(pidfile_path):
     os.unlink(pidfile_path)
 
 
-class LogConfig(object):
+def sigterm_handler_partial(mgr, signum, frame):
+    mgr.iptables_handler.delete_rule()
+    mgr.ipset_handler.destroy_ipset()
+    log.info('Shutdown.')
+    sys.exit(0)
 
+
+# End Utilities
+
+
+class LogConfig(object):
     def __init__(self, log_level='info', log_type='syslog', log_facility='daemon', log_path='/var/log/blocky.log'):
         self.log_level = log_level
         self.log_type = log_type
@@ -194,10 +205,18 @@ class IPTablesHandler(object):
             match.comment = self._comment
             match = rule.create_match('set')
             match.match_set = [self.ipset_name, 'src']
+            self.rule = rule
             log.info(
                 '''Inserting a rule with target DROP into chain %s (table %s) for ipset "%s" (with comment "%s")''',
                 self.chain_name, self.table_name, self.ipset_name, self._comment)
             self.chain.insert_rule(rule, position=0)
+
+    def delete_rule(self):
+        for rule in self.chain.rules:
+            for match in rule.matches:
+                if match.comment == self._comment:
+                    log.info('Deleting blocky IPTables rule (chain %s)', self.chain.name)
+                    self.chain.delete_rule(rule)
 
     def _rule_find(self):
         for rule in self.rules():
@@ -229,6 +248,11 @@ class IPSetHandler(object):
         cmds = flatten(['ipset', self.create_ipset_args.split()])
         self.run_ipset_cmd(cmds)
 
+    def destroy_ipset(self):
+        cmds = ['ipset', 'destroy', self.ipset_name]
+        log.info('Destroying ipset: %s', self.ipset_name)
+        self.run_ipset_cmd(cmds)
+
     def update_ipset(self, iplist):
         iplist.sort()
         if iplist != self.iplist_prev:
@@ -245,7 +269,8 @@ class IPSetHandler(object):
 
 class Settings(dict):
     def __init__(self, config_file='/etc/blocky.conf',
-                 mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level', 'log_type', 'pidfile']):
+                 mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level', 'log_type',
+                                   'pidfile']):
         self._config_file = config_file
         self._list_keys = ['domains']
         self._mandatory_fields = mandatory_fields
@@ -282,7 +307,7 @@ class StartupChecks(object):
         self.check_root()
         self.check_command_availability()
         self.check_table_and_chain()
-        # self.check_pidfile_process()
+        self.check_pidfile_process()
 
     def check_command_availability(self):
         for cmd, args in [('iptables', '-L -n'), ('ipset', '-L -n')]:
@@ -316,12 +341,13 @@ class StartupChecks(object):
         log.debug('pidfile: %s', pidfile)
         if os.path.isfile(pidfile):
             pid = None
-            for line in open(pidfile,'r'):
+            for line in open(pidfile, 'r'):
                 pid = line.strip()
                 if pid:
                     break
             try:
                 pid = int(pid)
+                log.debug('PID %s', pid)
                 pid_exists = psutil.pid_exists(pid)
                 proc = psutil.Process(pid)
                 if pid_exists and proc.name() == 'blocky.py':
@@ -337,28 +363,29 @@ class StartupChecks(object):
                 return
 
 
-
-
-class Checkpoint(object):
-
+class BlockManager(object):
     def __init__(self, settings):
         self.settings = settings
+        self.iptables_handler = None
+        self.ipset_handler = None
 
     def run(self):
         # Create ipset
-        ish = IPSetHandler(ipset_name=self.settings['ipset'])
-        ish.create_ipset()
+        self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
+        self.ipset_handler.create_ipset()
         # Insert iptables rule
-        ith = IPTablesHandler(table_name=self.settings['table'], chain_name=self.settings['chain'],
-                              ipset_name=self.settings['ipset'])
-        ith.insert_rule()
+        self.iptables_handler = IPTablesHandler(table_name=self.settings['table'], chain_name=self.settings['chain'],
+                                                ipset_name=self.settings['ipset'])
+        self.iptables_handler.insert_rule()
         delay = self.settings['check_every']
+        log.debug('check_every: %s', delay)
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
         setproctitle(proc_title)
         self.log_startup_notice()
         while True:
             iplist = detect.iplist()
-            ish.update_ipset(iplist)
+            log.debug('Blocked IP addresses: %s', ', '.join(map(str, iplist)))
+            self.ipset_handler.update_ipset(iplist)
             time.sleep(delay)
 
     def log_startup_notice(self):
@@ -379,14 +406,16 @@ class Main(object):
             # Parse config file
             settings = Settings()
             self.logconf = LogConfig()
-            self.logconf.set_log_level(settings.get('log_level', 'info'))
+            log_level = settings.get('log_level', 'info')
+            self.logconf.set_log_level(log_level)
             # Do startup checks
             sc = StartupChecks(settings)
             sc.test_prereqs()
             self.settings = settings
             self.logconf.set_handler(log_type=settings.get('log_type', 'syslog'),
                                      log_facility=settings.get('log_facility', 'daemon'),
-                                     log_path=settings.get('log_path', '/var/log/blocky.log'))
+                                     log_path=settings.get('log_path', '/var/log/blocky.log'),
+                                     log_level=log_level)
         except ConfigFileNotFound as e:
             log.error('Config file not found or [main] section is missing: %s', e)
             sys.exit(2)
@@ -416,19 +445,23 @@ class Main(object):
             sys.exit(9)
 
     def run(self):
-        with daemon.DaemonContext(pidfile=pidfile_ctxmgr(self.settings.get('pidfile', '/var/run/blocky.pid'))):
-            cp = Checkpoint(self.settings)
-            cp.run()
+        mgr = BlockManager(self.settings)
+        sig_map = {signal.SIGTERM: partial(sigterm_handler_partial, mgr)}
+        with daemon.DaemonContext(pidfile=pidfile_ctxmgr(self.settings.get('pidfile', '/var/run/blocky.pid')),
+                                  signal_map=sig_map):
+            mgr.run()
 
-# TODO: shutdown handler
+
+# DONE: shutdown handler
 # DONE: startup notif
-# TODO: startup check if pid exists and has title 'blocky'
-# TODO: delete ipset on shutdown
-# TODO: log blocked ips regularly
-# TODO: log blocked ips on change
-# TODO: detect rule by comment
-# TODO: delete rule on shutdown
+# DONE: startup check if pid exists and has title 'blocky'
+# DONE: delete ipset on shutdown
+# DONE: log blocked ips regularly
+# DONE: log blocked ips on change
+# DONE: detect rule by comment
+# DONE: delete rule on shutdown
 # DONE: log to system logger or a file
+# TODO: add rule at a config-specified position in chain
 
 if __name__ == '__main__':
     m = Main()
