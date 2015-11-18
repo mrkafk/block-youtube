@@ -7,7 +7,6 @@ import subprocess
 import time
 import signal
 from functools import partial
-
 import daemon
 import os
 import logging
@@ -52,6 +51,9 @@ class ConfigFileNotFound(Exception):
 class IncorrectCheckEvery(Exception):
     pass
 
+
+class IncorrectRulePosition(Exception):
+    pass
 
 class IncorrectLogType(Exception):
     pass
@@ -166,13 +168,14 @@ class DetectIPAddresses(object):
 
 
 class IPTablesHandler(object):
-    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky'):
+    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky', rule_pos=0):
         self.chain_name = chain_name
         self.table_name = table_name
         self.ipset_name = ipset_name
         self.chain = None
         self.table = None
         self.rule = None
+        self.rule_pos = rule_pos
         self._comment = 'Blocky IPTables Rule'
         self._table_find()
         self._chain_find()
@@ -209,7 +212,7 @@ class IPTablesHandler(object):
             log.info(
                 '''Inserting a rule with target DROP into chain %s (table %s) for ipset "%s" (with comment "%s")''',
                 self.chain_name, self.table_name, self.ipset_name, self._comment)
-            self.chain.insert_rule(rule, position=0)
+            self.chain.insert_rule(rule, position=self.rule_pos)
 
     def delete_rule(self):
         for rule in self.chain.rules:
@@ -291,7 +294,7 @@ class Settings(dict):
             visited.add(opt)
         diff = set(self._mandatory_fields) - visited
         if diff:
-            log.error('Following mandatory option(s) are not set in config file %s: %s. Aborting.', self._config_file,
+            log.error('Following mandatory option(s) are not set in config file %s: %s. Abort.', self._config_file,
                       ', '.join(map(str, list(diff))))
             sys.exit(1)
 
@@ -301,6 +304,8 @@ class StartupChecks(object):
         self.table_name = settings['table']
         self.chain_name = settings['chain']
         self.settings = settings
+        self.th = None
+        self.rule_pos = None
 
     def test_prereqs(self):
         self.check_int_check_every()
@@ -308,6 +313,8 @@ class StartupChecks(object):
         self.check_command_availability()
         self.check_table_and_chain()
         self.check_pidfile_process()
+        self.check_rule_pos_setting()
+        self.check_rule_pos()
 
     def check_command_availability(self):
         for cmd, args in [('iptables', '-L -n'), ('ipset', '-L -n')]:
@@ -319,12 +326,12 @@ class StartupChecks(object):
 
     def check_root(self):
         if os.geteuid():
-            print >> sys.stderr, 'This program has to be ran by root. Aborting.'
+            print >> sys.stderr, 'This program has to be ran by root. Abort.'
             sys.exit(1)
 
     def check_table_and_chain(self):
-        th = IPTablesHandler(table_name=self.table_name, chain_name=self.chain_name)
-        th._chain_find()
+        self.th = IPTablesHandler(table_name=self.table_name, chain_name=self.chain_name)
+        self.th._chain_find()
 
     def check_int_check_every(self):
         cev = self.settings.get('check_every')
@@ -335,6 +342,18 @@ class StartupChecks(object):
         if cev <= 0:
             raise IncorrectCheckEvery(cev)
         self.settings['check_every'] = cev
+
+    def check_rule_pos_setting(self):
+        rpos = self.settings.get('rule_pos', 0)
+        msg = 'Incorrect rule position (rule_pos setting, set currently to: {}). Abort.'.format(rpos)
+        try:
+            rpos = int(rpos)
+        except ValueError:
+            raise IncorrectRulePosition(msg)
+        if rpos < 0:
+            raise IncorrectRulePosition(msg)
+        self.settings['rule_pos'] = rpos
+        self.rule_pos = rpos
 
     def check_pidfile_process(self):
         pidfile = self.settings['pidfile']
@@ -362,6 +381,11 @@ class StartupChecks(object):
             except ValueError:
                 return
 
+    def check_rule_pos(self):
+        rules = self.th.rules()
+        if self.rule_pos > len(rules):
+            raise IncorrectRulePosition('Rule position ({}) is too high in IPTables chain (no of rules: {}). Abort.'.format(self.rule_pos, len(rules)))
+
 
 class BlockManager(object):
     def __init__(self, settings):
@@ -374,8 +398,10 @@ class BlockManager(object):
         self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
         self.ipset_handler.create_ipset()
         # Insert iptables rule
-        self.iptables_handler = IPTablesHandler(table_name=self.settings['table'], chain_name=self.settings['chain'],
-                                                ipset_name=self.settings['ipset'])
+        self.iptables_handler = IPTablesHandler(table_name=self.settings['table'],
+                                                chain_name=self.settings['chain'],
+                                                ipset_name=self.settings['ipset'],
+                                                rule_pos=int(self.settings.get('rule_pos', 0)))
         self.iptables_handler.insert_rule()
         delay = self.settings['check_every']
         log.debug('check_every: %s', delay)
@@ -429,20 +455,23 @@ class Main(object):
             log.error('ipset problem: %s', e)
             sys.exit(5)
         except IncorrectCheckEvery as e:
-            log.error('Incorrect check_every setting (%s) in config file. Aborting.', e)
+            log.error('Incorrect check_every setting (%s) in config file. Abort.', e)
             sys.exit(6)
         except IncorrectLogType as e:
-            log.error('Incorrect log_type setting (%s) in config file. Aborting.', e)
+            log.error('Incorrect log_type setting (%s) in config file. Abort.', e)
             sys.exit(7)
         except IncorrectLogLevel as e:
-            log.error('Incorrect log_level setting (%s) in config file. Aborting.', e)
+            log.error('Incorrect log_level setting (%s) in config file. Abort.', e)
             sys.exit(8)
         except IncorrectLogFacility as e:
-            log.error('Incorrect log_facility setting (%s) in config file. Aborting.', e)
+            log.error('Incorrect log_facility setting (%s) in config file. Abort.', e)
             sys.exit(9)
         except LogPathUnset as e:
-            log.error('Log type is set to file, but log_path setting (%s) is empty or incorrect. Aborting.', e)
-            sys.exit(9)
+            log.error('Log type is set to file, but log_path setting (%s) is empty or incorrect. Abort.', e)
+            sys.exit(10)
+        except IncorrectRulePosition as e:
+            log.error(e)
+            sys.exit(10)
 
     def run(self):
         mgr = BlockManager(self.settings)
@@ -461,7 +490,8 @@ class Main(object):
 # DONE: detect rule by comment
 # DONE: delete rule on shutdown
 # DONE: log to system logger or a file
-# TODO: add rule at a config-specified position in chain
+# DONE: add rule at a config-specified position in chain
+# TODO: debian packaging
 
 if __name__ == '__main__':
     m = Main()
