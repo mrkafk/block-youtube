@@ -87,6 +87,10 @@ def flatten(lst):
     return flat
 
 
+def parse_comma_separated(s):
+    return [x.strip() for x in s.split(',')]
+
+
 @contextlib.contextmanager
 def pidfile_ctxmgr(pidfile_path):
     pid = os.getpid()
@@ -185,7 +189,7 @@ class DetectIPAddresses(object):
 
 
 class IPTablesHandler(object):
-    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky', rule_pos=0,
+    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky', match_set_flag='src', rule_pos=0,
                  comment='Blocky IPTables Rule', target='DROP'):
         self.chain_name = chain_name
         self.table_name = table_name
@@ -196,6 +200,7 @@ class IPTablesHandler(object):
         self.rule = None
         self.rule_pos = rule_pos
         self._comment = comment
+        self.match_set_flag = match_set_flag
         self._table_find()
         self._chain_find()
         self._rule_find()
@@ -225,8 +230,9 @@ class IPTablesHandler(object):
             rule.target = rule.create_target(self.target)
             match = rule.create_match('comment')
             match.comment = self._comment
+
             match = rule.create_match('set')
-            match.match_set = [self.ipset_name, 'src']
+            match.match_set = [self.ipset_name, self.match_set_flag]
             self.rule = rule
             log.info(
                 '''Inserting a rule with target %s into chain %s (table %s) for ipset "%s" (with comment "%s")''',
@@ -258,17 +264,21 @@ class IPSetHandler(object):
     def _env(self):
         return {'PATH': self.path, 'LC_ALL': 'C'}
 
-    def run_ipset_cmd(self, cmds):
+    def run_ipset_cmd(self, cmds, msg_on_existing_ipset='', msg_on_creating_ipset=''):
         p = subprocess.Popen(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self._env())
         so, se = p.communicate()
         if p.returncode:
             if not so and se.find('set with the same name already exists') > -1:
+                log.info(msg_on_existing_ipset)
                 return
             raise IPSetError(se)
+        log.info(msg_on_creating_ipset)
 
     def create_ipset(self):
         cmds = flatten(['ipset', self.create_ipset_args.split()])
-        self.run_ipset_cmd(cmds)
+        log.debug('Creating ipset: %s', cmds)
+        self.run_ipset_cmd(cmds, msg_on_existing_ipset='ipset {} exists'.format(self.ipset_name),
+                           msg_on_creating_ipset='Creating ipset {}'.format(self.ipset_name))
 
     def destroy_ipset(self):
         cmds = ['ipset', 'destroy', self.ipset_name]
@@ -406,6 +416,7 @@ class StartupChecks(object):
             raise IncorrectRulePosition('Rule position ({}) is too high in IPTables chain (no of rules: {}). Abort.'.format(self.rule_pos, len(rules)))
 
 
+
 class BlockManager(object):
     def __init__(self, settings):
         self.settings = settings
@@ -421,20 +432,21 @@ class BlockManager(object):
         self.local_whitelist_iptables_handler = IPTablesHandler(table_name=self.settings['table'],
                                                 chain_name=self.settings['chain'],
                                                 ipset_name=whitelist_ipset_name,
+                                                match_set_flag='dst',
                                                 rule_pos=init_rule_pos,
                                                 comment='Blocky Whitelist IPTables Rule',
                                                 target='ACCEPT')
         self.local_whitelist_iptables_handler.insert_rule()
-        log.info('TEST')
+        self.local_whitelist_ipset_handler.update_ipset(iplist=parse_comma_separated(self.settings.get('whitelist_local_ips', '')))
+        # Create blocking ipset
+        self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
+        self.ipset_handler.create_ipset()
         # Insert blocking iptables rule
         self.iptables_handler = IPTablesHandler(table_name=self.settings['table'],
                                                 chain_name=self.settings['chain'],
                                                 ipset_name=self.settings['ipset'],
                                                 rule_pos=init_rule_pos+1)
         self.iptables_handler.insert_rule()
-        # Create blocking ipset
-        self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
-        self.ipset_handler.create_ipset()
         delay = self.settings['check_every']
         log.debug('check_every: %s', delay)
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
