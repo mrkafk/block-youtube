@@ -3,6 +3,7 @@
 import commands
 import contextlib
 import sys
+import traceback
 import subprocess
 import time
 import signal
@@ -25,6 +26,9 @@ log.setLevel(logging.INFO)
 
 proc_title = 'blocky.py'
 
+whitelist_ipset_name = 'blocky_local_ip_whitelist'
+
+run_foreground = False
 
 # Exceptions
 
@@ -99,6 +103,19 @@ def sigterm_handler_partial(mgr, signum, frame):
     sys.exit(0)
 
 
+def setup_exception_logger(chain=True, log=None):
+    import sys
+    import traceback
+    current_hook = sys.excepthook
+    def syslog_exception(etype, evalue, etb):
+        if chain:
+            current_hook(etype, evalue, etb)
+        for line in traceback.format_exception(etype, evalue, etb):
+            for line in line.rstrip().split('\n'):
+                log.error(line)
+    sys.excepthook = syslog_exception
+
+
 # End Utilities
 
 
@@ -168,15 +185,17 @@ class DetectIPAddresses(object):
 
 
 class IPTablesHandler(object):
-    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky', rule_pos=0):
+    def __init__(self, table_name='FILTER', chain_name='FORWARD', ipset_name='blocky', rule_pos=0,
+                 comment='Blocky IPTables Rule', target='DROP'):
         self.chain_name = chain_name
         self.table_name = table_name
         self.ipset_name = ipset_name
+        self.target = target
         self.chain = None
         self.table = None
         self.rule = None
         self.rule_pos = rule_pos
-        self._comment = 'Blocky IPTables Rule'
+        self._comment = comment
         self._table_find()
         self._chain_find()
         self._rule_find()
@@ -203,15 +222,15 @@ class IPTablesHandler(object):
         if not self.rule:
             rule = Rule()
             rule.protocol = 'tcp'
-            rule.target = rule.create_target('DROP')
+            rule.target = rule.create_target(self.target)
             match = rule.create_match('comment')
             match.comment = self._comment
             match = rule.create_match('set')
             match.match_set = [self.ipset_name, 'src']
             self.rule = rule
             log.info(
-                '''Inserting a rule with target DROP into chain %s (table %s) for ipset "%s" (with comment "%s")''',
-                self.chain_name, self.table_name, self.ipset_name, self._comment)
+                '''Inserting a rule with target %s into chain %s (table %s) for ipset "%s" (with comment "%s")''',
+                self.target, self.chain_name, self.table_name, self.ipset_name, self._comment)
             self.chain.insert_rule(rule, position=self.rule_pos)
 
     def delete_rule(self):
@@ -394,14 +413,26 @@ class BlockManager(object):
         self.ipset_handler = None
 
     def run(self):
-        # Insert iptables rule
+        init_rule_pos = int(self.settings.get('rule_pos', 0))
+        # Local IP Whitelist ipset
+        self.local_whitelist_ipset_handler = IPSetHandler(ipset_name=whitelist_ipset_name)
+        self.local_whitelist_ipset_handler.create_ipset()
+        # Local IP Whitelist iptables rule
+        self.local_whitelist_iptables_handler = IPTablesHandler(table_name=self.settings['table'],
+                                                chain_name=self.settings['chain'],
+                                                ipset_name=whitelist_ipset_name,
+                                                rule_pos=init_rule_pos,
+                                                comment='Blocky Whitelist IPTables Rule',
+                                                target='ACCEPT')
+        self.local_whitelist_iptables_handler.insert_rule()
+        log.info('TEST')
+        # Insert blocking iptables rule
         self.iptables_handler = IPTablesHandler(table_name=self.settings['table'],
                                                 chain_name=self.settings['chain'],
                                                 ipset_name=self.settings['ipset'],
-                                                rule_pos=int(self.settings.get('rule_pos', 0)))
-        self.iptables_handler.opt_insert_whitelist_rule()
+                                                rule_pos=init_rule_pos+1)
         self.iptables_handler.insert_rule()
-        # Create ipset
+        # Create blocking ipset
         self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
         self.ipset_handler.create_ipset()
         delay = self.settings['check_every']
@@ -435,6 +466,7 @@ class Main(object):
             self.logconf = LogConfig()
             log_level = settings.get('log_level', 'info')
             self.logconf.set_log_level(log_level)
+
             # Do startup checks
             sc = StartupChecks(settings)
             sc.test_prereqs()
@@ -443,6 +475,7 @@ class Main(object):
                                      log_facility=settings.get('log_facility', 'daemon'),
                                      log_path=settings.get('log_path', '/var/log/blocky.log'),
                                      log_level=log_level)
+            setup_exception_logger(log=log)
         except ConfigFileNotFound as e:
             log.error('Config file not found or [main] section is missing: %s', e)
             sys.exit(2)
@@ -477,9 +510,12 @@ class Main(object):
     def run(self):
         mgr = BlockManager(self.settings)
         sig_map = {signal.SIGTERM: partial(sigterm_handler_partial, mgr)}
-        with daemon.DaemonContext(pidfile=pidfile_ctxmgr(self.settings.get('pidfile', '/var/run/blocky.pid')),
-                                  signal_map=sig_map):
+        if run_foreground:
             mgr.run()
+        else:
+            with daemon.DaemonContext(pidfile=pidfile_ctxmgr(self.settings.get('pidfile', '/var/run/blocky.pid')),
+                                      signal_map=sig_map):
+                mgr.run()
 
 
 # DONE: shutdown handler
@@ -496,5 +532,8 @@ class Main(object):
 # TODO: whitelist local IP addresses
 
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '-f':
+        run_foreground = True
     m = Main()
     m.run()
+
