@@ -394,15 +394,16 @@ class BlockManager(object):
         self.ipset_handler = None
 
     def run(self):
-        # Create ipset
-        self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
-        self.ipset_handler.create_ipset()
         # Insert iptables rule
         self.iptables_handler = IPTablesHandler(table_name=self.settings['table'],
                                                 chain_name=self.settings['chain'],
                                                 ipset_name=self.settings['ipset'],
                                                 rule_pos=int(self.settings.get('rule_pos', 0)))
+        self.iptables_handler.opt_insert_whitelist_rule()
         self.iptables_handler.insert_rule()
+        # Create ipset
+        self.ipset_handler = IPSetHandler(ipset_name=self.settings['ipset'])
+        self.ipset_handler.create_ipset()
         delay = self.settings['check_every']
         log.debug('check_every: %s', delay)
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
@@ -492,6 +493,7 @@ class Main(object):
 # DONE: log to system logger or a file
 # DONE: add rule at a config-specified position in chain
 # TODO: debian packaging
+# TODO: whitelist local IP addresses
 
 if __name__ == '__main__':
     m = Main()
