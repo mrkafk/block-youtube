@@ -6,13 +6,22 @@ table = FILTER
 chain = INPUT
 
 # Number of seconds between domain(s) check (positive integer)
-check_every = 2
+check_every = 120
 
-# comma-separated list of domains to resolve and block their IP addresses
-domains = youtube.com, youtube.pl
+# Comma-separated list of domains to resolve and block their IP addresses
+# or
+# Read the list from file, notation: @/file/path/domlist
+domains = @/etc/local/web_domains_block.txt
+#domains = youtube.com, youtube.pl
 
 # ipset to use to block domain's IP addresses
 ipset = blocky_blacklist
+
+# Whitelist local IP addresses (comma-separated list)
+whitelist_local_ips = 10.0.0.223
+
+# iptables rule position in a chain
+rule_pos = 0
 
 # log_type: syslog, file
 log_type = syslog
@@ -21,8 +30,12 @@ log_type = syslog
 # log_path: if log_type is 'file', set file to log to here
 log_path = /var/log/blocky.log
 
-# log facility: auth, authpriv, cron, daemon, ftp, kern, lpr, mail, news, syslog, user, uucp, local0, local1, local2, local3, local4, local5, local6, local7
+# log facility, on Debian: auth, authpriv, cron, daemon, ftp, kern, lpr, mail, news, syslog, user, uucp, local0,
+# local1, local2, local3, local4, local5, local6, local7
 log_facility = daemon
 
 # log level: alert, critical, debug, emerg, error, info, notice, warn
-log_level = debug
+log_level = info
+
+# pidfile
+pidfile = /var/run/blocky.pid

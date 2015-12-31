@@ -3,7 +3,6 @@
 import commands
 import contextlib
 import sys
-import traceback
 import subprocess
 import time
 import signal
@@ -15,6 +14,7 @@ import logging.handlers
 import psutil
 from ConfigParser import ConfigParser
 from dns import resolver
+from dns.resolver import NXDOMAIN
 from iptc import Rule, Table
 from setproctitle import setproctitle
 
@@ -176,16 +176,26 @@ class LogConfig(object):
 
 
 class DetectIPAddresses(object):
-    def __init__(self, fqdns=[]):
+    def __init__(self, fqdns=None):
+        if fqdns is None:
+            fqdns = []
         self.fqdns = fqdns
         self._rslv = resolver.Resolver()
 
+    def _resolve_catch_err(self, fqdn):
+        try:
+            return self._rslv.query(fqdn, 'A')
+        except NXDOMAIN:
+            pass
+        return []
+
     def iplist(self):
         log.debug('FQDNs: %s', self.fqdns)
-        addresses = flatten([[x.address for x in self._rslv.query(fqdn, 'A')] for fqdn in self.fqdns])
-        uniq = list(set(addresses))
-        uniq.sort()
-        return uniq
+        resolver = self._resolve_catch_err
+        addresses = filter(None, flatten([list(resolver(fqdn)) for fqdn in self.fqdns]))
+        addresses = list(set([x.address for x in addresses]))
+        addresses.sort()
+        return addresses
 
 
 class IPTablesHandler(object):
@@ -272,7 +282,8 @@ class IPSetHandler(object):
                 log.info(msg_on_existing_ipset)
                 return
             raise IPSetError(se)
-        log.info(msg_on_creating_ipset)
+        if msg_on_creating_ipset:
+            log.info(msg_on_creating_ipset)
 
     def create_ipset(self):
         cmds = flatten(['ipset', self.create_ipset_args.split()])
@@ -302,7 +313,8 @@ class IPSetHandler(object):
 class Settings(dict):
     def __init__(self, config_file='/etc/blocky.conf',
                  mandatory_fields=['table', 'chain', 'check_every', 'domains', 'ipset', 'log_level', 'log_type',
-                                   'pidfile']):
+                                   'pidfile'], **kwargs):
+        super(Settings, self).__init__(**kwargs)
         self._config_file = config_file
         self._list_keys = ['domains']
         self._mandatory_fields = mandatory_fields
@@ -315,10 +327,13 @@ class Settings(dict):
             raise ConfigFileNotFound(self._config_file)
         visited = set()
         for opt in cp.options('main'):
-            val = cp.get('main', opt)
-            if opt in self._list_keys:
+            val = cp.get('main', opt).strip()
+            if val.startswith('@'):
+                val = self.check_opt_path(val)
+            elif opt in self._list_keys:
                 val = [x.strip() for x in val.split(',')]
             # setattr(self, opt, val)
+            val = self.check_opt_path(val)
             self[opt] = val
             visited.add(opt)
         diff = set(self._mandatory_fields) - visited
@@ -326,6 +341,16 @@ class Settings(dict):
             log.error('Following mandatory option(s) are not set in config file %s: %s. Abort.', self._config_file,
                       ', '.join(map(str, list(diff))))
             sys.exit(1)
+
+    def check_opt_path(self, val):
+        fpath = val[1:]
+        if isinstance(fpath, basestring) and os.path.isfile(fpath):
+            log.info('Reading values from file %s', fpath)
+            with open(fpath, 'rb') as fo:
+                values = [x.strip() for x in fo.readlines()]
+                values = [x for x in values if x and (not x.startswith('#'))]
+                return values
+        return val
 
 
 class StartupChecks(object):
@@ -452,9 +477,13 @@ class BlockManager(object):
         detect = DetectIPAddresses(fqdns=self.settings['domains'])
         setproctitle(proc_title)
         self.log_startup_notice()
+        cnt = 1
         while True:
             iplist = detect.iplist()
-            log.debug('Blocked IP addresses: %s', ', '.join(map(str, iplist)))
+            if cnt % 10 == 0:
+                log.info('Blocked IP addresses: %s', ', '.join(map(str, iplist)))
+                cnt = 0
+            cnt += 1
             self.ipset_handler.update_ipset(iplist)
             time.sleep(delay)
 
@@ -467,7 +496,6 @@ class BlockManager(object):
             val = self.settings.get(k)
             if isinstance(val, list):
                 val = ', '.join(map(str, val))
-            log.info('   %s: %s', k, val)
 
 
 class Main(object):
@@ -540,8 +568,9 @@ class Main(object):
 # DONE: delete rule on shutdown
 # DONE: log to system logger or a file
 # DONE: add rule at a config-specified position in chain
+# DONE: whitelist local IP addresses
+# DONE: read domains to block from a file (@file notation)
 # TODO: debian packaging
-# TODO: whitelist local IP addresses
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '-f':

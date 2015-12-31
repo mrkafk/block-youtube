@@ -9,9 +9,9 @@ setup(
     license='MIT',
     author='Marcin Krol',
     author_email='mrkafk@gmail.com',
-    description='Block YouTube IP addresses periodically in iptables',
+    description='Resolve and block IP addresses of a list of hostnames or domains periodically in iptables and ipset',
      classifiers=[
-          'Development Status :: 1 - Planning',
+          'Development Status :: 3 - Alpha',
           'Environment :: Console',
           'Intended Audience :: System Administrators',
           'License :: OSI Approved :: MIT License',
