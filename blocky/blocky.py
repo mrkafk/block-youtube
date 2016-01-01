@@ -97,7 +97,10 @@ def pidfile_ctxmgr(pidfile_path):
     with open(pidfile_path, 'wb') as fo:
         fo.write(str(pid))
     yield
-    os.unlink(pidfile_path)
+    try:
+        os.unlink(pidfile_path)
+    except OSError as exc:
+        pass
 
 
 def sigterm_handler_partial(mgr, signum, frame):
@@ -245,8 +248,8 @@ class IPTablesHandler(object):
             match.match_set = [self.ipset_name, self.match_set_flag]
             self.rule = rule
             log.info(
-                '''Inserting a rule with target %s into chain %s (table %s) for ipset "%s" (with comment "%s")''',
-                self.target, self.chain_name, self.table_name, self.ipset_name, self._comment)
+                '''Inserting a rule with target %s into chain %s (table %s) for ipset "%s" (with comment "%s", rule position: %s)''',
+                self.target, self.chain_name, self.table_name, self.ipset_name, self._comment, self.rule_pos)
             self.chain.insert_rule(rule, position=self.rule_pos)
 
     def delete_rule(self):
@@ -343,13 +346,17 @@ class Settings(dict):
             sys.exit(1)
 
     def check_opt_path(self, val):
-        fpath = val[1:]
-        if isinstance(fpath, basestring) and os.path.isfile(fpath):
-            log.info('Reading values from file %s', fpath)
-            with open(fpath, 'rb') as fo:
-                values = [x.strip() for x in fo.readlines()]
-                values = [x for x in values if x and (not x.startswith('#'))]
-                return values
+        if isinstance(val, basestring):
+            val = val.strip()
+            fpath = None
+            if val:
+                fpath = val[1:].strip()
+            if val.startswith('@') and fpath and os.path.isfile(fpath):
+                log.info('Reading values from file %s', fpath)
+                with open(fpath, 'rb') as fo:
+                    values = [x.strip() for x in fo.readlines()]
+                    values = [x for x in values if x and (not x.startswith('#'))]
+                    return values
         return val
 
 

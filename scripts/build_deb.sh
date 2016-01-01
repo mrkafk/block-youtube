@@ -10,10 +10,16 @@ DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 TOPDIR=$(readlink -ef "$DIR"/..)
 PARENT=$(readlink -ef "$TOPDIR"/..)
 
+# clean .pyc
+cd "$TOPDIR"
+find . -type f -name "*.pyc" | xargs rm -f
+
+# get version
 cd "$DIR"
 cd ../debian
 VER=$(cat changelog | grep blocky | egrep -o '[0-9]+\.[0-9\.]+')
 
+# create tarball
 TMPD=/tmp/$$.blocky
 mkdir $TMPD
 cd $TMPD
@@ -24,7 +30,7 @@ mv blocky "$TDIR"
 tar cfz "$TARBALL" "$TDIR"
 mv -f "$TARBALL" "$PARENT"
 
+# build
 cd "$TOPDIR"/debian
-
 debuild -us -uc
 rm -rf "$TMPD"
