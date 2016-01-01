@@ -47,7 +47,6 @@ coverage.xml
 *.mo
 *.pot
 
-# Django stuff:
 *.log
 
 # Sphinx documentation
@@ -58,3 +57,9 @@ target/
 
 .idea/
 ve/
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+debian/blocky
+build/
+debian/.debhelper

@@ -1,4 +1,4 @@
-from distutils.core import setup
+from setuptools import setup
 
 setup(
     name='blocky',
@@ -9,7 +9,7 @@ setup(
     license='MIT',
     author='Marcin Krol',
     author_email='mrkafk@gmail.com',
-    description='Resolve and block IP addresses of a list of hostnames or domains periodically in iptables and ipset',
+    description='Resolve and block IP addresses of a list of hostnames or domains periodically using iptables and ipset',
      classifiers=[
           'Development Status :: 3 - Alpha',
           'Environment :: Console',
@@ -21,7 +21,8 @@ setup(
           'Topic :: System :: Systems Administration',
           'Topic :: Utilities',
     ],
-    scripts=[
-         'bin/blocky',
-    ],
+    test_suite='tests',
+    # scripts=[
+    #      'bin/blocky',
+    # ],
 )

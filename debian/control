@@ -1,0 +1,12 @@
+Source: blocky
+Maintainer: Marcin Krol <mrkafk@gmail.com>
+Section: misc
+Priority: optional
+Standards-Version: 3.9.2
+Build-Depends: debhelper (>= 9), python (>= 2.7), dh-virtualenv
+
+Package: blocky
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ipset, iptables
+Description: Block Youtube
+ blocky resolves and blocks IP addresses of a list of hostnames or domains periodically using iptables and ipset
